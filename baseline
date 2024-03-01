@@ -1,0 +1,529 @@
+#%%
+import simpy
+import random
+import csv
+import pandas as pd
+import numpy as np
+import math
+import os
+import time
+
+scenario_name = 'new/baseline_2'
+
+path = ''  #define your own path
+os.chdir(path)
+
+    
+#print('directory found')
+var_list = ['Rep_ID',
+            'IBD_all', 'IBD_fu', 'IBD_new','IBD_short_wait',
+            'Liver_all', 'Liver_fu', 'Liver_new', 'Liver_short_wait',
+            'Motility_all', 'Motility_fu', 'Motility_new','Motility_short_wait', 
+            'Pancreas_all', 'Pancreas_fu', 'Pancreas_new', 'Pancreas_short_wait',
+            'run_time']
+
+with open(scenario_name + "/agg_results.csv", "a") as f:
+        writer = csv.writer(f, delimiter=",")
+        writer.writerow(var_list)
+
+#%%
+class global_parameter:
+    obs_duration= 52*5 # observation period or window (days) for simulation, in addition to warm-up period
+
+    def __init__(self, repid):
+        
+        self.warm_duration = 52*5*3 # warm up period: 3 years
+        self.max_fuopa_tenor_y = 5 # Patient follow-up horizon [years], simplification on how long each non first-only pathway lasts (years)
+        self.max_fuopa_tenor = self.max_fuopa_tenor_y * 365 # Patient follow-up horizon [days]
+        self.appt_counter = 0 # Counter for number of appointments [appointments], initialised
+        self.patients_waiting = 0
+        
+        self.prob_ibd = 0.1785 # % of IBD
+        self.prob_liver = 0.1797 # % of Liver
+        self.prob_motiltiy = 0.5832 # % Motility = 0.48
+        self.prob_pancreas = 0.0586 # % of Pancreas
+        
+        # number of daily slots [slots]
+        self.number_of_ibd_slots_MD = 15.5
+        self.number_of_liver_slots_MD = 8.48
+        self.number_of_motility_slots_MD = 5.39
+        self.number_of_pancreas_slots_MD = 5.59
+
+        self.number_of_ibd_slots_APP = 4.54
+        self.number_of_liver_slots_APP = 13.25
+        self.number_of_motility_slots_APP = 42.86
+        self.number_of_pancreas_slots_APP = 0.1
+        
+        self.repid = repid
+
+        self.slot_dict = {'ibd':{'APP': self.number_of_ibd_slots_APP, 'MD': self.number_of_ibd_slots_MD},
+                          'liver':{'APP': self.number_of_liver_slots_APP, 'MD': self.number_of_liver_slots_MD},
+                          'motility':{'APP': self.number_of_motility_slots_APP, 'MD': self.number_of_motility_slots_MD},
+                          'pancreas':{'MD':self.number_of_pancreas_slots_MD}}
+
+        self.fu_wait = {'ibd':20.9,
+                          'liver':18,
+                          'motility':10.2,
+                          'pancreas':5.6}
+        
+        self.results = pd.DataFrame() # populated in build_audit_results. audit results in one DF
+        self.new_patient_arrival = (pd.DataFrame(
+            columns=['run_ID','P_ID','App_ID','center', 'appt type','provider type','follow up','q_time','start_q'])) # Initialise dataframe to hold appointment log
+        self.appt_queuing_results = (pd.DataFrame(
+            columns=['run_ID','P_ID','App_ID','center', 'appt type','provider type','follow up','q_time','start_q'])) # Initialise dataframe to hold appointment log
+
+    
+    # Change number of replications
+    def change_reps(self,reps):
+        self.number_of_runs = reps
+        
+#%%
+class patient:
+    
+    # The following dictionaries store patients
+    all_patients = {}
+
+    # Initialised parameters
+    def __init__(self, p_id,in_path_horizon=365*10):
+        self.apptype = []
+        self.id = p_id # patient id
+        
+        self.queue_time = float("nan")
+        #self.q_time_telehealth_appt = float("nan")
+        #self.q_time_follow_up_appt = float("nan")
+
+        self.center = 'N/A' 
+        self.new_patient = False
+        self.leave = False
+        self.follow_up = False
+        self.appt_type = 'telehealth'
+        self.provider_type = 'MD' 
+        self.provider_num = 'N/A'
+        
+        self.max_fuopa_tenor = in_path_horizon # Maximum horizon for follow-up per pathway (as days since first OPA) [days]
+        
+        self.ls_appt = [] # Vector to hold ids of appointments for pathway
+        self.df_appt_to_add = (pd.DataFrame(
+            columns=['run_ID','P_ID','App_ID','center', 'appt type','provider type','follow up','q_time','start_q']))  # Initialise dataframe to hold appointment log
+        self.ls_appt_to_add = [] # Initialise list to hold appointment info 
+        self.ls_patient_to_add = [] # Initialise list to hold pathway info
+                
+    # assign center
+    def assign_center(self,prob_pancreas,prob_ibd,prob_liver,prob_motiltiy):
+        #if random.random() < prob_telehealth:
+          #  self.appt_type = 'telehealth'
+          #  self.center = 'telehealth'
+        #else: 
+        self.center = np.random.choice(['pancreas','ibd','liver','motility'],p=[prob_pancreas,prob_ibd,prob_liver,prob_motiltiy])
+
+    def assign_provider_type(self):
+        u = random.random()
+        if self.center == 'ibd':
+            if u < 0.1833:
+                self.provider_type = 'APP'
+        if self.center == 'liver':
+            if u < 0.60:
+                self.provider_type = 'APP'
+        if self.center == 'motility':
+            if u < 0.9009:
+                self.provider_type = 'APP'
+        if self.center == 'pancreas':
+            if u < 0:
+                self.provider_type = 'APP'
+                
+    # assign telehealth
+    def assign_telehealth(self):
+        u = random.random()
+        
+        if self.center == 'ibd':
+            if u < 0.5229:
+                self.appt_type = 'office'
+        if self.center == 'liver':
+            if u < 0.5503:
+                self.appt_type = 'office'                
+        if self.center == 'motility':
+            if u < 0.5096:
+                self.appt_type = 'office'
+        if self.center == 'pancreas':
+            if u < 0.4786:
+                self.appt_type = 'office'
+                
+                
+    def assign_follow_up(self):
+        u = np.random.random()
+        
+        if self.center == 'ibd':
+            if u < 0.406:
+                self.follow_up = True
+        if self.center == 'liver':
+            if u < 0.433:
+                self.follow_up = True                
+        if self.center == 'motility':
+            if u < 0.265:
+                self.follow_up = True
+        if self.center == 'pancreas':
+            if u < 0.270:
+                self.follow_up = True
+                
+    #def assign_follow_up(self, prob_book_follow_up):
+        #if random.random() < prob_book_follow_up:
+            #self.follow_up = True
+#%%            
+class DHGI_Model:
+    def __init__(self, repid):
+        self.savepath = '/thayerfs/home/f0053s9/DHGI/results/'+scenario_name
+        #self.savepath = '/Users/banban/Documents/Dartmouth/DHGI/results/'
+        self.env = simpy.Environment() # instance of environment
+
+        self.g = global_parameter(repid=repid)
+        self.repid=repid
+                
+        self.patient_counter = 0 # patient counter instantiated to 0
+        self.block_counter = 0 # block counter instantiated to 0 (to control that right no of unavailable slots are enforced)
+
+        #self.consultant_telehealth_MD = simpy.PriorityResource(self.env, capacity=self.g.number_of_telehealth_slots_MD) # set up resources, i.e. appointment slot units (assume 1 unit - 15 min slot)
+        self.consultant_pancreas_MD_1 = simpy.PriorityResource(self.env, capacity=self.g.number_of_pancreas_slots_MD/2) # set up resources, i.e. appointment slot units (assume 1 unit - 15 min slot)
+        self.consultant_pancreas_MD_2 = simpy.PriorityResource(self.env, capacity=self.g.number_of_pancreas_slots_MD/2)
+        #self.consultant_pancreas_MD_3 = simpy.PriorityResource(self.env, capacity=self.g.number_of_pancreas_slots_MD)
+        self.consultant_ibd_MD_1 = simpy.PriorityResource(self.env, capacity=self.g.number_of_ibd_slots_MD/2)
+        self.consultant_ibd_MD_2 = simpy.PriorityResource(self.env, capacity=self.g.number_of_ibd_slots_MD/2)
+        #self.consultant_ibd_MD_3 = simpy.PriorityResource(self.env, capacity=self.g.number_of_ibd_slots_MD)
+        #self.consultant_ibd_MD_4 = simpy.PriorityResource(self.env, capacity=self.g.number_of_ibd_slots_MD)
+        #self.consultant_ibd_MD_5 = simpy.PriorityResource(self.env, capacity=self.g.number_of_ibd_slots_MD)
+        #self.consultant_ibd_MD_6 = simpy.PriorityResource(self.env, capacity=self.g.number_of_ibd_slots_MD)
+        self.consultant_liver_MD_1 = simpy.PriorityResource(self.env, capacity=self.g.number_of_liver_slots_MD/2)        
+        self.consultant_liver_MD_2 = simpy.PriorityResource(self.env, capacity=self.g.number_of_liver_slots_MD/2)
+        self.consultant_motility_MD_1 = simpy.PriorityResource(self.env, capacity=self.g.number_of_motility_slots_MD/2)
+        self.consultant_motility_MD_2 = simpy.PriorityResource(self.env, capacity=self.g.number_of_motility_slots_MD/2)
+        #self.consultant_motility_MD_3 = simpy.PriorityResource(self.env, capacity=self.g.number_of_motility_slots_MD)
+
+        #self.consultant_telehealth_APP = simpy.PriorityResource(self.env, capacity=self.g.number_of_telehealth_slots_APP)
+        self.consultant_pancreas_APP_1 = simpy.PriorityResource(self.env, capacity=self.g.number_of_pancreas_slots_APP/2) # set up resources, i.e. appointment slot units (assume 1 unit - 15 min slot)
+        self.consultant_pancreas_APP_2 = simpy.PriorityResource(self.env, capacity=self.g.number_of_pancreas_slots_APP/2)
+        self.consultant_ibd_APP_1 = simpy.PriorityResource(self.env, capacity=self.g.number_of_ibd_slots_APP/2)
+        self.consultant_ibd_APP_2 = simpy.PriorityResource(self.env, capacity=self.g.number_of_ibd_slots_APP/2)
+        self.consultant_liver_APP_1 = simpy.PriorityResource(self.env, capacity=self.g.number_of_liver_slots_APP/2)
+        self.consultant_liver_APP_2 = simpy.PriorityResource(self.env, capacity=self.g.number_of_liver_slots_APP/2)
+        #self.consultant_liver_APP_3 = simpy.PriorityResource(self.env, capacity=self.g.number_of_liver_slots_APP)
+        self.consultant_motility_APP_1 = simpy.PriorityResource(self.env, capacity=self.g.number_of_motility_slots_APP/2)
+        self.consultant_motility_APP_2 = simpy.PriorityResource(self.env, capacity=self.g.number_of_motility_slots_APP/2)
+        #self.consultant_motility_APP_3 = simpy.PriorityResource(self.env, capacity=self.g.number_of_motility_slots_APP)
+        #self.consultant_motility_APP_4 = simpy.PriorityResource(self.env, capacity=self.g.number_of_motility_slots_APP)
+        
+        self.resource_list = {
+                            'office':
+                                    {'pancreas':{'MD':[self.consultant_pancreas_MD_1],'APP':[self.consultant_pancreas_APP_1]},
+                                      'ibd':{'MD':[self.consultant_ibd_MD_1],'APP':[self.consultant_ibd_APP_1]},
+                                      'liver':{'MD':[self.consultant_liver_MD_1],'APP':[self.consultant_liver_APP_1]},
+                                      'motility':{'MD':[self.consultant_motility_MD_1],'APP':[self.consultant_motility_APP_1]}},
+                              'telehealth':
+                                    {'pancreas':{'MD':[self.consultant_pancreas_MD_2],'APP':[self.consultant_pancreas_APP_2]},
+                                      'ibd':{'MD':[self.consultant_ibd_MD_2],'APP':[self.consultant_ibd_APP_2]},
+                                      'liver':{'MD':[self.consultant_liver_MD_2],'APP':[self.consultant_liver_APP_2]},
+                                      'motility':{'MD':[self.consultant_motility_MD_2],'APP':[self.consultant_motility_APP_2]}}
+                              }
+        #self.run_number = run_number # [integer] run number id
+        
+        self.mean_q_time_total = pd.DataFrame() # [running but deprecated]
+        self.results_df = pd.DataFrame() # [running but deprecated]
+        #self.results_df.set_index("P_ID", inplace=True) # [running but deprecated]
+
+    # A method that generates patients arriving for the RTT outpatient 'clinic'
+    def generate_ibd_arrivals(self):
+        # Keep generating indefinitely (until the simulation ends)
+        while True:
+            # Increment the patient counter by 1
+            self.patient_counter += 1
+            
+            # Create a new patient
+            # give the patient an ID determined by the patient
+            wp = patient(self.patient_counter)
+            #print(self.env.now, 'new patient arrives, ID:', wp.id)
+            
+            # Add patient to dictionary of patients
+            patient.all_patients[wp.id] = wp
+            # Get the SimPy environment to run the attend_OPA method
+            # with this patient
+            #wp.assign_center(self.g.prob_pancreas,self.g.prob_ibd,self.g.prob_liver,self.g.prob_motiltiy)
+            wp.center = 'ibd'
+            wp.assign_provider_type()
+            wp.assign_telehealth()
+            #print(wp.center, wp.provider_type, wp.appt_type)
+            
+            self.env.process(self.book_appointment(wp))
+
+            u = np.random.random()
+            
+            #if wp.center == 'ibd':
+            if u < 0.1882:
+                sampled_interarrival = 1
+            elif u < 0.4039:
+                sampled_interarrival = 1/random.uniform(1,2)
+            elif u < 0.5647:
+                sampled_interarrival = 1/random.uniform(2,3)
+            elif u < 0.7255:
+                sampled_interarrival = 1/random.uniform(3,4)
+            elif u < 0.8353:
+                sampled_interarrival = 1/random.uniform(4,5)             
+            elif u < 0.9098:
+                sampled_interarrival = 1/random.uniform(5,6)
+            else:
+                sampled_interarrival = 1/random.uniform(6,10)
+
+            yield self.env.timeout(sampled_interarrival*0.7)
+            #print('yield', sampled_interarrival)
+            
+
+    def generate_liver_arrivals(self):
+        # Keep generating indefinitely (until the simulation ends)
+        while True:
+            # Increment the patient counter by 1
+            self.patient_counter += 1
+            
+            # Create a new patient
+            # give the patient an ID determined by the patient
+            wp = patient(self.patient_counter)
+            #print(self.env.now, 'new patient arrives, ID:', wp.id)
+            
+            # Add patient to dictionary of patients
+            patient.all_patients[wp.id] = wp
+            # Get the SimPy environment to run the attend_OPA method
+            # with this patient
+            #wp.assign_center(self.g.prob_pancreas,self.g.prob_ibd,self.g.prob_liver,self.g.prob_motiltiy)
+            wp.center = 'liver'
+            wp.assign_provider_type()
+            wp.assign_telehealth()
+            #print(wp.center, wp.provider_type, wp.appt_type)
+            
+            self.env.process(self.book_appointment(wp))
+
+            u = np.random.random()
+            if u < 0.1725:
+                sampled_interarrival = 1
+            elif u < 0.3529:
+                sampled_interarrival = 1/random.uniform(1,2)
+            elif u < 0.5804:
+                sampled_interarrival = 1/random.uniform(2,3)
+            elif u < 0.7569:
+                sampled_interarrival = 1/random.uniform(3,4)
+            elif u < 0.8392:
+                sampled_interarrival = 1/random.uniform(4,5)             
+            elif u < 0.9098:
+                sampled_interarrival = 1/random.uniform(5,6)
+            else:
+                sampled_interarrival = 1/random.uniform(6,10)
+            yield self.env.timeout(sampled_interarrival*0.65)
+            #print('yield', sampled_interarrival)
+
+    def generate_motility_arrivals(self):
+        # Keep generating indefinitely (until the simulation ends)
+        while True:
+            # Increment the patient counter by 1
+            self.patient_counter += 1
+            
+            # Create a new patient
+            # give the patient an ID determined by the patient
+            wp = patient(self.patient_counter)
+            #print(self.env.now, 'new patient arrives, ID:', wp.id)
+            
+            # Add patient to dictionary of patients
+            patient.all_patients[wp.id] = wp
+            # Get the SimPy environment to run the attend_OPA method
+            # with this patient
+            #wp.assign_center(self.g.prob_pancreas,self.g.prob_ibd,self.g.prob_liver,self.g.prob_motiltiy)
+            wp.center = 'motility'
+            wp.assign_provider_type()
+            wp.assign_telehealth()
+            #print(wp.center, wp.provider_type, wp.appt_type)
+            
+            self.env.process(self.book_appointment(wp))
+
+            u = np.random.random()
+            if u < 0.0717:
+                sampled_interarrival = 1
+            elif u < 0.1290:
+                sampled_interarrival = 1/random.uniform(2,4)
+            elif u < 0.2616:
+                sampled_interarrival = 1/random.uniform(4,6)
+            elif u < 0.3907:
+                sampled_interarrival = 1/random.uniform(6,8)
+            elif u < 0.5484:
+                sampled_interarrival = 1/random.uniform(8,10)             
+            elif u < 0.7097:
+                sampled_interarrival = 1/random.uniform(10,12)
+            elif u < 0.7849:
+                sampled_interarrival = 1/random.uniform(12,14)
+            elif u < 0.8710:
+                sampled_interarrival = 1/random.uniform(14,16)             
+            elif u < 0.9427:
+                sampled_interarrival = 1/random.uniform(16,18)
+            else:
+                sampled_interarrival = 1/random.uniform(18,24)
+            yield self.env.timeout(sampled_interarrival*0.8)
+            #print('yield', sampled_interarrival)
+
+
+    def generate_pancreas_arrivals(self):
+        # Keep generating indefinitely (until the simulation ends)
+        while True:
+            # Increment the patient counter by 1
+            self.patient_counter += 1
+            
+            # Create a new patient
+            # give the patient an ID determined by the patient
+            wp = patient(self.patient_counter)
+            #print(self.env.now, 'new patient arrives, ID:', wp.id)
+            
+            # Add patient to dictionary of patients
+            patient.all_patients[wp.id] = wp
+            # Get the SimPy environment to run the attend_OPA method
+            # with this patient
+            #wp.assign_center(self.g.prob_pancreas,self.g.prob_ibd,self.g.prob_liver,self.g.prob_motiltiy)
+            wp.center = 'pancreas'
+            wp.assign_provider_type()
+            wp.assign_telehealth()
+            #print(wp.center, wp.provider_type, wp.appt_type)
+            
+            self.env.process(self.book_appointment(wp))
+
+            u = np.random.random()
+            if u < 0.3009:
+                sampled_interarrival = 1
+            elif u < 0.5841:
+                sampled_interarrival = 1/random.uniform(1,2)
+            elif u < 0.7655:
+                sampled_interarrival = 1/random.uniform(2,3)
+            elif u < 0.8584:
+                sampled_interarrival = 1/random.uniform(3,4)
+            elif u < 0.9558:
+                sampled_interarrival = 1/random.uniform(4,5)
+            else:
+                sampled_interarrival = 1/random.uniform(5,10)
+            yield self.env.timeout(sampled_interarrival*2.75)
+            
+    def follow_up_interval(self, patient):
+        u = np.random.random()
+        
+        if u < 0.1347:
+            next_follow_up = random.uniform(0,30)
+        elif u < 0.3670:
+            next_follow_up = random.uniform(30,60)
+        elif u < 0.5621:
+            next_follow_up = random.uniform(60,90)
+        elif u < 0.7138:
+            next_follow_up = random.uniform(90,120)  
+        elif u < 0.8129:
+            next_follow_up = random.uniform(120,150)
+        elif u < 0.8736:
+            next_follow_up = random.uniform(150,180)
+        else:
+            next_follow_up = random.uniform(180,360)
+
+        return next_follow_up
+    
+    def book_appointment(self, patient):
+        
+        #patient.assign_telehealth(self.g.prob_telehealth)
+        #patient.assign_center(self.g.prob_pancreas,self.g.prob_ibd,self.g.prob_liver,self.g.prob_motiltiy) #assign center
+        #patient.assign_provider_type()
+        #patient.assign_telehealth()
+        
+        start_queue = self.env.now
+        self.g.appt_counter +=1 # increment
+        patient.ls_appt.append(self.g.appt_counter) # append
+        self.g.patients_waiting += 1 
+        
+        provider = self.resource_list[patient.appt_type][patient.center][patient.provider_type][0]
+        with provider.request() as req:
+            yield req
+            end_queue = self.env.now
+            patient.queue_time = (end_queue-start_queue) + math.floor((end_queue-start_queue)/5)*2
+            self.g.patients_waiting -= 1
+            yield self.env.timeout(2 * 1/(self.g.slot_dict[patient.center][patient.provider_type]/2))
+            yield self.env.timeout(1)
+            
+            patient.ls_appt_to_add = [self.repid,patient.id, patient.ls_appt[-1], patient.center, patient.appt_type, patient.provider_type,
+                                    patient.follow_up,patient.queue_time, start_queue]        
+            patient.df_appt_to_add = pd.DataFrame( columns = ['run_ID','P_ID','App_ID','center', 'appt type','provider type','follow up','q_time','start_q'],
+                                            data=[patient.ls_appt_to_add])
+            self.g.new_patient_arrival=self.g.new_patient_arrival.append(patient.df_appt_to_add)
+            if start_queue > self.g.warm_duration:
+                self.g.appt_queuing_results=self.g.appt_queuing_results.append(patient.df_appt_to_add)
+        
+        # follow up appointment
+        #patient.assign_follow_up(self.g.prob_book_follow_up)
+        #if patient.follow_up == True:
+        while self.env.now - end_queue < patient.max_fuopa_tenor:
+            patient.assign_follow_up()
+            if patient.follow_up:
+                sampled_interfu_duration = self.follow_up_interval(patient)
+                yield self.env.timeout(sampled_interfu_duration)
+                            
+                start_queue = self.env.now
+                self.g.appt_counter +=1 # increment
+                patient.ls_appt.append(self.g.appt_counter) # append
+                self.g.patients_waiting += 1  
+                        
+                provider = self.resource_list[patient.appt_type][patient.center][patient.provider_type][0]
+                yield self.env.timeout(self.g.fu_wait[patient.center])
+                with provider.request() as req:
+                    yield req
+                    end_queue = self.env.now
+                    patient.queue_time = (end_queue-start_queue) + math.floor((end_queue-start_queue)/5)*2
+                    self.g.patients_waiting -= 1
+                    yield self.env.timeout(1/(self.g.slot_dict[patient.center][patient.provider_type]/2))
+                    yield self.env.timeout(1)
+                    
+                    patient.ls_appt_to_add = [self.repid,patient.id, patient.ls_appt[-1], patient.center, patient.appt_type, patient.provider_type, 
+                                            patient.follow_up,patient.queue_time, start_queue]        
+                    patient.df_appt_to_add = pd.DataFrame( columns = ['run_ID','P_ID','App_ID','center', 'appt type','provider type','follow up','q_time','start_q'],
+                                                    data=[patient.ls_appt_to_add])
+                    if start_queue > self.g.warm_duration: 
+                        self.g.appt_queuing_results=self.g.appt_queuing_results.append(patient.df_appt_to_add)
+                
+        del patient.all_patients[patient.id]
+        
+    def run(self):
+        start = time.time()
+        self.env.process(self.generate_ibd_arrivals())
+        self.env.process(self.generate_liver_arrivals())
+        self.env.process(self.generate_motility_arrivals())
+        self.env.process(self.generate_pancreas_arrivals())
+
+        # Run simulation
+        self.env.run(until=self.g.obs_duration + self.g.warm_duration)
+
+        self.g.appt_queuing_results.to_csv(self.savepath + '/obs_period/obs_result_run_' + str(self.g.repid) + '.csv',index=False)
+        self.g.new_patient_arrival.to_csv(self.savepath + '/new_patient/new_patient_run_' + str(self.g.repid) + '.csv',index=False)
+        
+        q_time_avg = [self.g.repid]
+        #q_time_avg.append(np.mean(self.g.appt_queuing_results.loc[(self.g.appt_queuing_results['rapid']==True)&(self.g.appt_queuing_results['appt type']==False)]['q_time']))
+        #q_time_avg.append(np.mean(self.g.appt_queuing_results.loc[(self.g.appt_queuing_results['rapid']==True)&(self.g.appt_queuing_results['appt type']==True)]['q_time']))
+
+        for center_name in ['ibd','liver','motility','pancreas']:
+            q_time_avg.append(np.mean(self.g.appt_queuing_results.loc[(self.g.appt_queuing_results['center']==center_name)]['q_time']))
+            q_time_avg.append(np.mean(self.g.appt_queuing_results.loc[(self.g.appt_queuing_results['center']==center_name)&(self.g.appt_queuing_results['follow up']==True)]['q_time']))
+            q_time_avg.append(np.mean(self.g.appt_queuing_results.loc[(self.g.appt_queuing_results['center']==center_name)&(self.g.appt_queuing_results['follow up']==False)]['q_time']))
+
+            new_patient_count = len(self.g.appt_queuing_results.loc[(self.g.appt_queuing_results['center']==center_name)&(self.g.appt_queuing_results['follow up']==False)])
+            short_wait_count = len(self.g.appt_queuing_results.loc[(self.g.appt_queuing_results['center']==center_name)&(self.g.appt_queuing_results['follow up']==False)&(self.g.appt_queuing_results['q_time']<=10)])
+            q_time_avg.append(short_wait_count/new_patient_count)
+            
+        end = time.time()
+        time_taken = end - start
+        q_time_avg.append(time_taken)
+        
+        with open(self.savepath +"/agg_results.csv", "a") as f:
+            writer = csv.writer(f, delimiter=",")
+            writer.writerow(q_time_avg)
+
+        result = pd.read_csv(f'{scenario_name}/agg_results.csv')
+        result.loc[:, result.columns != 'Rep_ID'].mean().to_frame().reset_index().to_csv(f'{scenario_name}/summary.csv', index=False)
+
+
+#%%
+random.seed(19)
+for run in range(200):
+    DHGI_Model(repid=run).run()                
+    
+# %%
