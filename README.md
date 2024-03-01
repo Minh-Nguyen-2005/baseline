@@ -1,1 +1,5 @@
-# baseline
+# Data Science for Optimization of Healthcare Operations: Improving Real-time Appointment-matching System
+
+The pandemic has had a considerable impact on elective care and currently, the waiting list is at its highest on record, with over 6.6 million people waiting for consultant-led elective care. It is estimated that around 6M fewer people completed elective pathways between January 2020 and July 2021. Operational performance, defined by the proportion of those seen within 18 weeks (target of 92%) has dropped significantly. The proportion seen within 18 weeks has dropped to below 65%.
+
+As such, in this project, we propose to develop a real-time appointment-matching simulation program with constrained resources using SimPy environment, where patient assignments to healthcare providers in the Upper Valley area are simulated and monitored such that patients always go to the provider with the shortest line. Thus, this research project aims to utilize the power of Data and AI to optimize Hitchcock Hospital’s healthcare system by minimizing patients’ wait time and speeding up the process of arranging appointments, hence supporting patients’ access to prioritized medical care services.
