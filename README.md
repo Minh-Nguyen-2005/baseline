@@ -6,7 +6,7 @@ As such, in this project, we propose to develop a real-time appointment-matching
 
 ## Baseline
 
-A collection of baseline implementations for biomedical classification tasks, covering Inflammatory Bowel Disease (IBD), Liver, Gastrointestinal Motility, and Pancreas datasets. This repository provides a single “baseline” script that trains and evaluates simple models across each domain, plus per‐task folders containing data preprocessing, training notebooks, and result summaries.
+A collection of baseline implementations for biomedical classification tasks, covering IBD, Liver, Motility, and Pancreas datasets. This repository provides a single “baseline” script that trains and evaluates simple models across each domain, plus per‐task folders for each medical center containing data preprocessing (using Python and SimPy), training notebooks, queuing simulations (using AnyLogic and Java), and Excel result summaries.
 
 ## Table of Contents
 
@@ -34,12 +34,12 @@ A collection of baseline implementations for biomedical classification tasks, co
 
 ## Requirements
 
-- Python 3.8+  
+- Python 3.8+
+- AnyLogic
 - `numpy`  
 - `pandas`  
 - `scikit-learn`  
 - `matplotlib`  
-- Any other dependencies listed in `requirements.txt`  
 
 ## Installation
 
