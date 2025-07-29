@@ -57,10 +57,9 @@ pip install -r requirements.txt
 
 ## Usage
 
-The main baseline script lives at: ```baseline/baseline.py```
+The main baseline script lives at: baseline/baseline.py
 
 It can be invoked from the project root:
-```bash
 python baseline/baseline.py \
     --task IBD \
     --data-path ./IBD \
